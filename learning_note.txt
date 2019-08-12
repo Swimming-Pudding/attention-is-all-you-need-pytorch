@@ -1,0 +1,44 @@
+input: src:[batch_size,len_src], tgt:[batch_size,len_tgt](len_tgt是original_tgt[:-1])
+process:
+	1. 整个model中，为保证Add&Norm的运行，数据以512维的形式流转（包括embedding）
+	2. encoder:
+		(0). embedding lookup->[batch_size,len_src,512] + position_encoding
+		(1). 输入的是上一层encoder的输出：[batch_size,len_src,512]
+		(2). k=q=v=encoder_input
+		(3). wq[512,n_head*d_q],wk[512,n_head*d_k],wv[512,n_head*d_v]
+		(4). q=q*wq, k=k*wk, v=v*wv, reshape->[n*b,lq,dk]
+		(5). bmm:q*k(transpose)/sqrt(d_k)->[n*b,lq,lk]
+		(6). mask:set -inf to places in output of (5) where it's <PAD> in k
+		(7). softmax,dropout,multiply v->[n*b,lq,dv]
+		(8). dropout,layernorm
+		(9). mask out <PAD> in src
+		(10). linear_forward_2(activate(linear_forward_1)),dropout,layernorm
+		(11). mask out <PAD> in src
+		(12). (1)-(10) 6 times
+	3. decoder:
+		(0). embedding lookup->[batch_size,len_tgt,512] + position_encoding
+		(1). 输入的是上一层decoder的输出：[batch_size,len_tgt,512]
+		(2). k=q=v=decoder_input
+		(3). wq[512,n_head*d_q],wk[512,n_head*d_k],wv[512,n_head*d_v]
+		(4). q=q*wq, k=k*wk, v=v*wv, reshape->[n*b,lq,dk]
+		(5). bmm:q*k(transpose)/sqrt(d_k)->[n*b,lq,lk]
+		(6). mask:
+			a. places in output of (5) where it's <PAD> in k
+			b. places in output of (5) like:[0,1,1,1;0,0,1,1;0,0,0,1;0,0,0,0](这个mask是为了使系统output只与它之前时刻的词有关)
+			mask=a+b, set -inf
+		(7). softmax,dropout,multiply v->[n*b,lq,dv]
+		(8). dropout,layernorm->dec_output[n*b,lq,dv]
+		(9). mask out <PAD> in tgt
+		(10). q_new=dec_output[n*b,lq,dv],k_new=v_new=enc_output[n*b,lq_enc,dv]
+		(11). bmm:q_new*k_new(transpose)/sqrt(d_k)->[n*b,lq,lq_enc]
+		(12). mask: <PAD> in src
+		(13). softmax,dropout,multiply v_new
+		(14). dropout,layernorm
+		(15). mask out <PAD> in tgt
+		(16). linear_forward_2(activate(linear_forward_1)),dropout,layernorm
+		(17). mask out <PAD> in tgt
+		(18). linear_projection
+		(19). mask out <PAD> in tgt
+		(19). (1)-(19) 6 times
+	4. gold: original_tgt[1:]
+	5. optim.Adam
